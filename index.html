@@ -683,7 +683,7 @@ function prepCanvas(c){
 }
 function loadScript(src){return new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=()=>rej(new Error('script'));document.head.appendChild(s)})}
 /* ---------- AI reading (Gemini, key kept on this device) ---------- */
-const GMODELS=['gemini-2.5-flash','gemini-flash-latest'];
+const GMODELS=['gemini-flash-latest'];
 function aiPrompt(){
   return `添付の画像は日本のレシートまたは領収書です。内容を読み取り、次の形式のJSONだけを返してください。
 {"isReceipt":true,"store":"店名","date":"YYYY-MM-DD","total":0,"category":"食事","items":[{"name":"品名","price":0}]}
@@ -706,38 +706,64 @@ function normAi(o){
 const gUrl=(m,k,mode)=>'https://generativelanguage.googleapis.com/v1beta/models/'+m+':generateContent'+(mode==='q'?'?key='+encodeURIComponent(k):'');
 const gHdr=(mode,k)=>mode==='q'?{'Content-Type':'application/json'}:{'Content-Type':'application/json','x-goog-api-key':k};
 async function errMsgOf(res){try{const j=await res.json();return (j&&j.error&&j.error.message)||''}catch(e){return ''}}
-async function readWithAI(key,dataUrl,signal){
-  const b64=dataUrl.split(',')[1];
-  const body=JSON.stringify({contents:[{parts:[{text:aiPrompt()},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],generationConfig:{responseMimeType:'application/json',temperature:0}});
-  let lastErr=null;
-  for(const m of GMODELS){
+async function pickModels(key,signal){
+  try{
+    const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key='+encodeURIComponent(key),{signal});
+    if(!r.ok)return [];
+    const j=await r.json();
+    const list=(j.models||[]).filter(m=>m&&typeof m.name==='string'&&(m.supportedGenerationMethods||[]).includes('generateContent')).map(m=>m.name.replace(/^models\//,''));
+    const ok=list.filter(n=>/^gemini-/.test(n)&&/flash/.test(n)&&!/lite|image|tts|live|audio|embed|robot|computer|exp|native|thinking|preview/.test(n));
+    const ver=n=>{const m=n.match(/gemini-(\d+(?:\.\d+)?)/);return m?parseFloat(m[1]):0};
+    ok.sort((a,b)=>ver(b)-ver(a));
+    const out=[];
+    if(list.includes('gemini-flash-latest'))out.push('gemini-flash-latest');
+    for(const n of ok)if(!out.includes(n))out.push(n);
+    return out.slice(0,4);
+  }catch(e){if(signal&&signal.aborted)throw e;return []}
+}
+async function callModels(key,cands,body,signal){
+  for(const m of cands){
     let res=null;
     for(const mode of ['h','q']){
       try{res=await fetch(gUrl(m,key,mode),{method:'POST',headers:gHdr(mode,key),body,signal})}
       catch(e){if(signal.aborted)throw e;res=null;continue}
       if(res.ok||res.status===404||res.status===429)break;
     }
-    if(!res){lastErr={code:'net'};break}
-    if(res.status===404){lastErr={code:'model',detail:'404'};continue}
+    if(!res)throw {code:'net'};
+    if(res.status===404)continue;
     if(!res.ok){
       const msg=await errMsgOf(res);
-      lastErr={code:res.status===429?'limit':(res.status===400||res.status===401||res.status===403)?'key':'http',detail:res.status+(msg?' '+msg.slice(0,90):'')};
-      break;
+      throw {code:res.status===429?'limit':(res.status===400||res.status===401||res.status===403)?'key':'http',detail:res.status+(msg?' '+msg.slice(0,90):'')};
     }
-    let j;try{j=await res.json()}catch(e){lastErr={code:'json'};break}
+    let j;try{j=await res.json()}catch(e){throw {code:'json'}}
     const parts=j&&j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts;
     const t=Array.isArray(parts)?parts.map(p=>p.text||'').join(''):'';
-    if(!t){lastErr={code:'empty'};break}
-    let o;try{o=JSON.parse(t.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g,''))}catch(e){lastErr={code:'json'};break}
-    return normAi(o);
+    if(!t)throw {code:'empty'};
+    let o;try{o=JSON.parse(t.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g,''))}catch(e){throw {code:'json'}}
+    const r=normAi(o);
+    LS.set('tatekae.gm',m);
+    return r;
   }
-  throw lastErr||{code:'http'};
+  throw {code:'model',detail:'使えるモデルがありません'};
+}
+async function readWithAI(key,dataUrl,signal){
+  const b64=dataUrl.split(',')[1];
+  const body=JSON.stringify({contents:[{parts:[{text:aiPrompt()},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],generationConfig:{responseMimeType:'application/json',temperature:0}});
+  const cached=LS.get('tatekae.gm');
+  if(cached){
+    try{return await callModels(key,[cached],body,signal)}
+    catch(e){if(!(e&&e.code==='model'))throw e;LS.del('tatekae.gm')}
+  }
+  let cands=await pickModels(key,signal);
+  if(!cands.length)cands=GMODELS.slice();
+  return await callModels(key,cands,body,signal);
 }
 function aiErrMsg(e){
   const c=e&&e.code;
   const why=c==='key'?'AIのキーが正しくないか、使えない状態です。設定で確認してください。'
     :c==='limit'?'AIの無料の利用上限に達しました。しばらくしてからお試しください。'
     :c==='net'?'AIに接続できませんでした。設定の「接続をテスト」で原因を確認できます。'
+    :c==='model'?'使えるAIモデルが見つかりませんでした。'
     :c==='notreceipt'?'AIがレシートとして読み取れませんでした。'
     :'AIでうまく読み取れませんでした。';
   return why+(e&&e.detail?'('+e.detail+')':'')+' 簡易の読み取りに切り替えました。';
@@ -748,15 +774,17 @@ async function testKey(){
   if(!k){out.textContent='先にキーを保存してください。';return}
   out.textContent='確認中…';
   const lines=[];
+  const cands=await pickModels(k);
+  lines.push('使えるモデル: '+(cands.join(', ')||'取得できませんでした'));
+  const m=cands[0]||'gemini-flash-latest';
   for(const mode of ['h','q']){
     const name=mode==='h'?'方式A':'方式B';
     try{
-      const r=await fetch(gUrl('gemini-2.5-flash',k,mode),{method:'POST',headers:gHdr(mode,k),body:JSON.stringify({contents:[{parts:[{text:'okと返してください'}]}]})});
+      const r=await fetch(gUrl(m,k,mode),{method:'POST',headers:gHdr(mode,k),body:JSON.stringify({contents:[{parts:[{text:'okと返してください'}]}]})});
       let msg='';try{const j=await r.json();msg=(j&&j.error&&j.error.message)||(j&&j.candidates?'応答あり':'')}catch(e){}
-      lines.push(name+': '+r.status+' '+msg.slice(0,110));
+      lines.push(name+'('+m+'): '+r.status+' '+msg.slice(0,110));
     }catch(e){lines.push(name+': 接続できません(通信またはブラウザの制限)')}
   }
-  lines.push('端末: '+(navigator.onLine?'オンライン':'オフライン'));
   out.textContent=lines.join('\n');
 }
 function saveKey(){
