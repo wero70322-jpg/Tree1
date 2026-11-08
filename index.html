@@ -722,15 +722,17 @@ async function pickModels(key,signal){
   }catch(e){if(signal&&signal.aborted)throw e;return []}
 }
 async function callModels(key,cands,body,signal){
+  let busy=null;
   for(const m of cands){
     let res=null;
     for(const mode of ['h','q']){
       try{res=await fetch(gUrl(m,key,mode),{method:'POST',headers:gHdr(mode,key),body,signal})}
       catch(e){if(signal.aborted)throw e;res=null;continue}
-      if(res.ok||res.status===404||res.status===429)break;
+      if(res.ok||res.status===404||res.status===429||res.status>=500)break;
     }
     if(!res)throw {code:'net'};
     if(res.status===404)continue;
+    if(res.status>=500){busy={code:'busy',detail:String(res.status)};continue}
     if(!res.ok){
       const msg=await errMsgOf(res);
       throw {code:res.status===429?'limit':(res.status===400||res.status===401||res.status===403)?'key':'http',detail:res.status+(msg?' '+msg.slice(0,90):'')};
@@ -744,25 +746,33 @@ async function callModels(key,cands,body,signal){
     LS.set('tatekae.gm',m);
     return r;
   }
+  if(busy)throw busy;
   throw {code:'model',detail:'使えるモデルがありません'};
 }
+const sleep=(ms,signal)=>new Promise((res,rej)=>{const t=setTimeout(res,ms);if(signal)signal.addEventListener('abort',()=>{clearTimeout(t);rej({name:'AbortError'})},{once:true})});
 async function readWithAI(key,dataUrl,signal){
   const b64=dataUrl.split(',')[1];
   const body=JSON.stringify({contents:[{parts:[{text:aiPrompt()},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],generationConfig:{responseMimeType:'application/json',temperature:0}});
   const cached=LS.get('tatekae.gm');
   if(cached){
     try{return await callModels(key,[cached],body,signal)}
-    catch(e){if(!(e&&e.code==='model'))throw e;LS.del('tatekae.gm')}
+    catch(e){if(!(e&&(e.code==='model'||e.code==='busy')))throw e;if(e.code==='model')LS.del('tatekae.gm')}
   }
   let cands=await pickModels(key,signal);
   if(!cands.length)cands=GMODELS.slice();
-  return await callModels(key,cands,body,signal);
+  try{return await callModels(key,cands,body,signal)}
+  catch(e){
+    if(!(e&&e.code==='busy'))throw e;
+    await sleep(2500,signal);
+    return await callModels(key,cands,body,signal);
+  }
 }
 function aiErrMsg(e){
   const c=e&&e.code;
   const why=c==='key'?'AIのキーが正しくないか、使えない状態です。設定で確認してください。'
     :c==='limit'?'AIの無料の利用上限に達しました。しばらくしてからお試しください。'
     :c==='net'?'AIに接続できませんでした。設定の「接続をテスト」で原因を確認できます。'
+    :c==='busy'?'AIが混み合っています。少し待ってから、もう一度お試しください。'
     :c==='model'?'使えるAIモデルが見つかりませんでした。'
     :c==='notreceipt'?'AIがレシートとして読み取れませんでした。'
     :'AIでうまく読み取れませんでした。';
@@ -776,14 +786,17 @@ async function testKey(){
   const lines=[];
   const cands=await pickModels(k);
   lines.push('使えるモデル: '+(cands.join(', ')||'取得できませんでした'));
-  const m=cands[0]||'gemini-flash-latest';
-  for(const mode of ['h','q']){
-    const name=mode==='h'?'方式A':'方式B';
-    try{
-      const r=await fetch(gUrl(m,k,mode),{method:'POST',headers:gHdr(mode,k),body:JSON.stringify({contents:[{parts:[{text:'okと返してください'}]}]})});
-      let msg='';try{const j=await r.json();msg=(j&&j.error&&j.error.message)||(j&&j.candidates?'応答あり':'')}catch(e){}
-      lines.push(name+'('+m+'): '+r.status+' '+msg.slice(0,110));
-    }catch(e){lines.push(name+': 接続できません(通信またはブラウザの制限)')}
+  for(const m of (cands.length?cands:['gemini-flash-latest']).slice(0,4)){
+    let ok=false;
+    for(const mode of ['h','q']){
+      try{
+        const r=await fetch(gUrl(m,k,mode),{method:'POST',headers:gHdr(mode,k),body:JSON.stringify({contents:[{parts:[{text:'okと返してください'}]}]})});
+        let msg='';try{const j=await r.json();msg=(j&&j.error&&j.error.message)||(j&&j.candidates?'応答あり':'')}catch(e){}
+        lines.push(m+': '+r.status+' '+msg.slice(0,60));
+        ok=r.ok;break;
+      }catch(e){if(mode==='q')lines.push(m+': 接続できません')}
+    }
+    if(ok)break;
   }
   out.textContent=lines.join('\n');
 }
