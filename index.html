@@ -473,7 +473,7 @@ function settingsHtml(){
     <button class="btn primary wide" data-action="save-settings" type="button">保存する</button>
     <p class="hint" style="margin-top:14px">ホーム画面に置くには、iPhoneはSafariの共有ボタンから「ホーム画面に追加」、AndroidはChromeのメニューから「ホーム画面に追加」を選びます。</p>
     <div class="field" style="margin-top:18px"><label class="lbl" for="g-key">AIで読み取るためのキー(この端末のみ)</label>
-      <input type="password" id="g-key" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${LS.get('tatekae.gk')?'設定済み(変更するときだけ入力)':'AIza...'}">
+      <input type="password" id="g-key" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${LS.get('tatekae.gk')?'設定済み(変更するときだけ入力)':'ここに貼り付け'}">
       <button class="btn small" data-action="save-key" type="button">キーを保存</button>
       <span class="hint">レシートの読み取りが正確になります。<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>でGoogleアカウントにログインし、「APIキーを作成」で無料で作れます。キーはこの端末にだけ保存され、相手には共有されません。使うと、レシートの写真がGoogleに送られます。空欄で保存すると、キーを削除します。</span></div>
     <button class="btn danger small" data-action="reset-conn" type="button">${S.resetArm?'もう一度押すとリセット':'この端末の接続をリセット'}</button>`;
@@ -731,7 +731,7 @@ function aiErrMsg(e){
 }
 function saveKey(){
   const v=($('#g-key').value||'').trim();
-  if(v&&!/^[A-Za-z0-9_\-]{20,80}$/.test(v)){toast('キーの形式が違います。コピーし直してください');return}
+  if(v&&!/^[A-Za-z0-9_.\-]{20,200}$/.test(v)){toast('キーの形式が違います。コピーし直してください');return}
   if(v){LS.set('tatekae.gk',v);toast('キーを保存しました')}
   else{LS.del('tatekae.gk');toast('キーを削除しました')}
   $('#panel').innerHTML=settingsHtml();
