@@ -475,6 +475,8 @@ function settingsHtml(){
     <div class="field" style="margin-top:18px"><label class="lbl" for="g-key">AIで読み取るためのキー(この端末のみ)</label>
       <input type="password" id="g-key" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${LS.get('tatekae.gk')?'設定済み(変更するときだけ入力)':'ここに貼り付け'}">
       <button class="btn small" data-action="save-key" type="button">キーを保存</button>
+      <button class="btn small" data-action="test-key" type="button">接続をテスト</button>
+      <pre class="code" id="g-test" hidden style="white-space:pre-wrap"></pre>
       <span class="hint">レシートの読み取りが正確になります。<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>でGoogleアカウントにログインし、「APIキーを作成」で無料で作れます。キーはこの端末にだけ保存され、相手には共有されません。使うと、レシートの写真がGoogleに送られます。空欄で保存すると、キーを削除します。</span></div>
     <button class="btn danger small" data-action="reset-conn" type="button">${S.resetArm?'もう一度押すとリセット':'この端末の接続をリセット'}</button>`;
 }
@@ -701,16 +703,27 @@ function normAi(o){
   const items=(Array.isArray(o.items)?o.items:[]).filter(i=>i&&i.name).slice(0,15).map(i=>{const pr=Math.round(Number(i.price));return {name:String(i.name).slice(0,40),price:Number.isFinite(pr)?pr:null}});
   return {store:typeof o.store==='string'?o.store.trim().slice(0,60):'',date,total:Number.isFinite(total)&&total>0?total:null,category:CATS.includes(o.category)?o.category:'',items};
 }
+const gUrl=(m,k,mode)=>'https://generativelanguage.googleapis.com/v1beta/models/'+m+':generateContent'+(mode==='q'?'?key='+encodeURIComponent(k):'');
+const gHdr=(mode,k)=>mode==='q'?{'Content-Type':'application/json'}:{'Content-Type':'application/json','x-goog-api-key':k};
+async function errMsgOf(res){try{const j=await res.json();return (j&&j.error&&j.error.message)||''}catch(e){return ''}}
 async function readWithAI(key,dataUrl,signal){
   const b64=dataUrl.split(',')[1];
   const body=JSON.stringify({contents:[{parts:[{text:aiPrompt()},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],generationConfig:{responseMimeType:'application/json',temperature:0}});
   let lastErr=null;
   for(const m of GMODELS){
-    let res;
-    try{res=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+m+':generateContent?key='+encodeURIComponent(key),{method:'POST',headers:{'Content-Type':'application/json'},body,signal})}
-    catch(e){if(signal.aborted)throw e;lastErr={code:'net'};break}
-    if(res.status===404){lastErr={code:'model'};continue}
-    if(!res.ok){lastErr={code:res.status===429?'limit':(res.status===400||res.status===401||res.status===403)?'key':'http'};break}
+    let res=null;
+    for(const mode of ['h','q']){
+      try{res=await fetch(gUrl(m,key,mode),{method:'POST',headers:gHdr(mode,key),body,signal})}
+      catch(e){if(signal.aborted)throw e;res=null;continue}
+      if(res.ok||res.status===404||res.status===429)break;
+    }
+    if(!res){lastErr={code:'net'};break}
+    if(res.status===404){lastErr={code:'model',detail:'404'};continue}
+    if(!res.ok){
+      const msg=await errMsgOf(res);
+      lastErr={code:res.status===429?'limit':(res.status===400||res.status===401||res.status===403)?'key':'http',detail:res.status+(msg?' '+msg.slice(0,90):'')};
+      break;
+    }
     let j;try{j=await res.json()}catch(e){lastErr={code:'json'};break}
     const parts=j&&j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts;
     const t=Array.isArray(parts)?parts.map(p=>p.text||'').join(''):'';
@@ -724,10 +737,27 @@ function aiErrMsg(e){
   const c=e&&e.code;
   const why=c==='key'?'AIのキーが正しくないか、使えない状態です。設定で確認してください。'
     :c==='limit'?'AIの無料の利用上限に達しました。しばらくしてからお試しください。'
-    :c==='net'?'AIに接続できませんでした。'
+    :c==='net'?'AIに接続できませんでした。設定の「接続をテスト」で原因を確認できます。'
     :c==='notreceipt'?'AIがレシートとして読み取れませんでした。'
     :'AIでうまく読み取れませんでした。';
-  return why+'簡易の読み取りに切り替えました。';
+  return why+(e&&e.detail?'('+e.detail+')':'')+' 簡易の読み取りに切り替えました。';
+}
+async function testKey(){
+  const k=LS.get('tatekae.gk');const out=$('#g-test');if(!out)return;
+  out.hidden=false;
+  if(!k){out.textContent='先にキーを保存してください。';return}
+  out.textContent='確認中…';
+  const lines=[];
+  for(const mode of ['h','q']){
+    const name=mode==='h'?'方式A':'方式B';
+    try{
+      const r=await fetch(gUrl('gemini-2.5-flash',k,mode),{method:'POST',headers:gHdr(mode,k),body:JSON.stringify({contents:[{parts:[{text:'okと返してください'}]}]})});
+      let msg='';try{const j=await r.json();msg=(j&&j.error&&j.error.message)||(j&&j.candidates?'応答あり':'')}catch(e){}
+      lines.push(name+': '+r.status+' '+msg.slice(0,110));
+    }catch(e){lines.push(name+': 接続できません(通信またはブラウザの制限)')}
+  }
+  lines.push('端末: '+(navigator.onLine?'オンライン':'オフライン'));
+  out.textContent=lines.join('\n');
 }
 function saveKey(){
   const v=($('#g-key').value||'').trim();
@@ -919,6 +949,7 @@ document.addEventListener('click',ev=>{
     case 'copy-rules':copyText(RULES,null);break;
     case 'copy-link':copyText(shareLink(),$('#share-link'));break;
     case 'save-key':saveKey();break;
+    case 'test-key':testKey();break;
     case 'reset-conn':resetConn();break;
   }
 });
