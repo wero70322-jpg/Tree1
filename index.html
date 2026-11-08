@@ -187,6 +187,17 @@ a{color:var(--brand)}
 .steps li>div{grid-column:2;color:var(--ink-2);min-width:0}
 pre.code{margin:8px 0;padding:10px 12px;background:var(--surface-2);border:1px solid var(--line);border-radius:10px;font:12px/1.5 var(--f-num);overflow-x:auto;white-space:pre;color:var(--ink)}
 textarea.in{display:block;width:100%;border:1px solid var(--line-strong);border-radius:10px;background:var(--surface);padding:10px 12px;font:13px/1.5 var(--f-num);margin:8px 0;resize:vertical}
+
+/* no sideways wobble in sheets; iOS date input kept inside its column */
+html,body{overflow-x:hidden;overscroll-behavior-x:none}
+.sheet{overscroll-behavior:contain;touch-action:pan-y}
+.panel{overflow-x:hidden;overscroll-behavior:contain;touch-action:pan-y}
+.panel *{max-width:100%}
+.field input[type=date]{-webkit-appearance:none;appearance:none;display:block;width:100%;max-width:100%;min-width:0;text-align:left;line-height:normal}
+.field input[type=date]::-webkit-date-and-time-value{text-align:left;min-width:0;margin:0}
+.field input[type=date]::-webkit-calendar-picker-indicator{margin:0}
+.amt-in{max-width:100%}
+.amt-in input{text-align:left}
 </style>
 </head>
 <body>
