@@ -472,6 +472,10 @@ function settingsHtml(){
     <p class="err" id="n-err" hidden></p>
     <button class="btn primary wide" data-action="save-settings" type="button">保存する</button>
     <p class="hint" style="margin-top:14px">ホーム画面に置くには、iPhoneはSafariの共有ボタンから「ホーム画面に追加」、AndroidはChromeのメニューから「ホーム画面に追加」を選びます。</p>
+    <div class="field" style="margin-top:18px"><label class="lbl" for="g-key">AIで読み取るためのキー(この端末のみ)</label>
+      <input type="password" id="g-key" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${LS.get('tatekae.gk')?'設定済み(変更するときだけ入力)':'AIza...'}">
+      <button class="btn small" data-action="save-key" type="button">キーを保存</button>
+      <span class="hint">レシートの読み取りが正確になります。<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>でGoogleアカウントにログインし、「APIキーを作成」で無料で作れます。キーはこの端末にだけ保存され、相手には共有されません。使うと、レシートの写真がGoogleに送られます。空欄で保存すると、キーを削除します。</span></div>
     <button class="btn danger small" data-action="reset-conn" type="button">${S.resetArm?'もう一度押すとリセット':'この端末の接続をリセット'}</button>`;
 }
 
@@ -564,7 +568,7 @@ function setScan(state,msg,pct){
   if(state==='reading')body=`<b><span class="spin"></span>${esc(msg||'読み取り中…')}${pct!=null?' '+pct+'%':''}</b>入力しながら待てます。<br><button class="btn small" data-action="stop-scan" type="button">中止</button>`;
   else if(state==='done')body=`<b>読み取りました</b>${esc(msg||'')}<br>${pick('写真を選び直す')}`;
   else if(state==='error'||state==='manual')body=`<b>${state==='error'?'読み取れませんでした':'写真を添付しました'}</b>${esc(msg||'')}<br>${pick('別の写真を選ぶ')}`;
-  else body=`<b>レシートの写真から入力</b>撮影すると、金額・日付・お店を読み取って入れます。読み取りは完全ではないので、記録の前に確認してください。<br>${pick('写真を撮る・選ぶ')}`;
+  else body=`<b>レシートの写真から入力</b>${LS.get('tatekae.gk')?'AIで金額・日付・お店を読み取ります。記録の前に確認してください。':'いまは簡易の読み取りです。精度を上げるには、設定でAIのキーを入れてください。'}<br>${pick('写真を撮る・選ぶ')}`;
   box.innerHTML=th+`<div class="tx">${body}</div>`;
 }
 
@@ -676,6 +680,62 @@ function prepCanvas(c){
   x.putImageData(d,0,0);
 }
 function loadScript(src){return new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=()=>rej(new Error('script'));document.head.appendChild(s)})}
+/* ---------- AI reading (Gemini, key kept on this device) ---------- */
+const GMODELS=['gemini-2.5-flash','gemini-flash-latest'];
+function aiPrompt(){
+  return `添付の画像は日本のレシートまたは領収書です。内容を読み取り、次の形式のJSONだけを返してください。
+{"isReceipt":true,"store":"店名","date":"YYYY-MM-DD","total":0,"category":"食事","items":[{"name":"品名","price":0}]}
+ルール:
+- total は客が実際に支払った税込の合計金額(整数・円)。お預り金額、お釣り、小計、ポイント利用前の金額は使わない。合計が複数あるときは最終的な支払総額を選ぶ。
+- date は西暦に直す(令和N年は2018+N年、「26/11/08」は2026-11-08)。今日は${todayStr()}。
+- category は 食事 / 買い物 / 日用品 / 交通 / 娯楽 / その他 のどれか1つ。
+- items は読み取れた商品を最大15件。自信のないものは入れない。
+- 読み取れない項目は null にする。数字を推測で作らない。
+- 画像がレシートでなければ isReceipt を false にする。`;
+}
+function normAi(o){
+  if(!o||typeof o!=='object'||o.isReceipt===false)throw {code:'notreceipt'};
+  const total=Math.round(Number(String(o.total==null?'':o.total).replace(/[^\d.]/g,'')));
+  let date=isDate(o.date)?o.date:null;
+  if(date){const d=pd(date);if(d<new Date(2015,0,1)||d>new Date(Date.now()+864e5))date=null}
+  const items=(Array.isArray(o.items)?o.items:[]).filter(i=>i&&i.name).slice(0,15).map(i=>{const pr=Math.round(Number(i.price));return {name:String(i.name).slice(0,40),price:Number.isFinite(pr)?pr:null}});
+  return {store:typeof o.store==='string'?o.store.trim().slice(0,60):'',date,total:Number.isFinite(total)&&total>0?total:null,category:CATS.includes(o.category)?o.category:'',items};
+}
+async function readWithAI(key,dataUrl,signal){
+  const b64=dataUrl.split(',')[1];
+  const body=JSON.stringify({contents:[{parts:[{text:aiPrompt()},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],generationConfig:{responseMimeType:'application/json',temperature:0}});
+  let lastErr=null;
+  for(const m of GMODELS){
+    let res;
+    try{res=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+m+':generateContent?key='+encodeURIComponent(key),{method:'POST',headers:{'Content-Type':'application/json'},body,signal})}
+    catch(e){if(signal.aborted)throw e;lastErr={code:'net'};break}
+    if(res.status===404){lastErr={code:'model'};continue}
+    if(!res.ok){lastErr={code:res.status===429?'limit':(res.status===400||res.status===401||res.status===403)?'key':'http'};break}
+    let j;try{j=await res.json()}catch(e){lastErr={code:'json'};break}
+    const parts=j&&j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts;
+    const t=Array.isArray(parts)?parts.map(p=>p.text||'').join(''):'';
+    if(!t){lastErr={code:'empty'};break}
+    let o;try{o=JSON.parse(t.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g,''))}catch(e){lastErr={code:'json'};break}
+    return normAi(o);
+  }
+  throw lastErr||{code:'http'};
+}
+function aiErrMsg(e){
+  const c=e&&e.code;
+  const why=c==='key'?'AIのキーが正しくないか、使えない状態です。設定で確認してください。'
+    :c==='limit'?'AIの無料の利用上限に達しました。しばらくしてからお試しください。'
+    :c==='net'?'AIに接続できませんでした。'
+    :c==='notreceipt'?'AIがレシートとして読み取れませんでした。'
+    :'AIでうまく読み取れませんでした。';
+  return why+'簡易の読み取りに切り替えました。';
+}
+function saveKey(){
+  const v=($('#g-key').value||'').trim();
+  if(v&&!/^[A-Za-z0-9_\-]{20,80}$/.test(v)){toast('キーの形式が違います。コピーし直してください');return}
+  if(v){LS.set('tatekae.gk',v);toast('キーを保存しました')}
+  else{LS.del('tatekae.gk');toast('キーを削除しました')}
+  $('#panel').innerHTML=settingsHtml();
+}
 async function runScan(file){
   const F=S.form;if(!F)return;
   if(F.stop)F.stop();
@@ -683,16 +743,32 @@ async function runScan(file){
   const live=()=>S.form===F&&tok===F.token;
   let worker=null,stopped=false;
   F.stop=()=>{stopped=true;if(worker){try{worker.terminate()}catch(e){}worker=null}};
+  F.aiNote='';
   setScan('reading','写真を準備中…');
   let loaded;
   try{loaded=await loadImg(file)}catch(e){if(live())setScan('error','この写真を開けませんでした。別の写真を選ぶか、手入力してください。');return}
   let canvas;
   try{
     F.thumb=canvasOf(loaded.im,900).toDataURL('image/jpeg',0.6);
-    canvas=canvasOf(loaded.im,1600);prepCanvas(canvas);
+    canvas=canvasOf(loaded.im,1600);F.jpeg=canvas.toDataURL('image/jpeg',0.85);prepCanvas(canvas);
   }catch(e){URL.revokeObjectURL(loaded.url);if(live())setScan('error','この写真を処理できませんでした。別の写真を選ぶか、手入力してください。');return}
   URL.revokeObjectURL(loaded.url);
   if(!live())return;
+  const gk=LS.get('tatekae.gk');
+  if(gk&&F.jpeg){
+    setScan('reading','AIで読み取り中…');
+    const ctl=new AbortController();
+    F.stop=()=>{stopped=true;ctl.abort();if(worker){try{worker.terminate()}catch(e){}worker=null}};
+    try{
+      const r=await readWithAI(gk,F.jpeg,ctl.signal);
+      if(!live()||stopped)return;
+      applyScan(F,r);return;
+    }catch(e){
+      if(!live())return;
+      if(stopped||(e&&e.name==='AbortError')){setScan('manual','読み取りを中止しました。金額などを入力してください。');return}
+      F.aiNote=aiErrMsg(e);
+    }
+  }
   setScan('reading','読み取りの準備中…(初回はデータの読み込みに数分かかることがあります)');
   try{
     if(!window.Tesseract)await loadScript(TESS);
@@ -720,10 +796,10 @@ function applyScan(F,r){
   if(r.store)put('f-store',r.store);
   if(r.date)put('f-date',r.date);
   if(CATS.includes(r.category))put('f-cat',r.category);
-  F.items=[];
+  F.items=Array.isArray(r.items)?r.items:[];
   updateClaim();
   const miss=[];if(!(r.total>0))miss.push('金額');if(!r.date)miss.push('日付');
-  setScan('done',miss.length?`${miss.join('・')}は読み取れませんでした。入力してください。`:'金額と日付を確かめてから記録してください。');
+  setScan('done',(F.aiNote?F.aiNote+' ':'')+(miss.length?`${miss.join('・')}は読み取れませんでした。入力してください。`:'金額と日付を確かめてから記録してください。'));
 }
 
 /* ---------- writes ---------- */
@@ -842,6 +918,7 @@ document.addEventListener('click',ev=>{
     case 'join':join();break;
     case 'copy-rules':copyText(RULES,null);break;
     case 'copy-link':copyText(shareLink(),$('#share-link'));break;
+    case 'save-key':saveKey();break;
     case 'reset-conn':resetConn();break;
   }
 });
