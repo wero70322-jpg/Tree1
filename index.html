@@ -569,7 +569,7 @@ function setScan(state,msg,pct){
   let body;
   if(state==='reading')body=`<b><span class="spin"></span>${esc(msg||'読み取り中…')}${pct!=null?' '+pct+'%':''}</b>入力しながら待てます。<br><button class="btn small" data-action="stop-scan" type="button">中止</button>`;
   else if(state==='done')body=`<b>読み取りました</b>${esc(msg||'')}<br>${pick('写真を選び直す')}`;
-  else if(state==='error'||state==='manual')body=`<b>${state==='error'?'読み取れませんでした':'写真を添付しました'}</b>${esc(msg||'')}<br>${pick('別の写真を選ぶ')}`;
+  else if(state==='error'||state==='manual')body=`<b>${state==='error'?'読み取れませんでした':'写真を添付しました'}</b>${esc(msg||'')}<br>${F.aiFailed&&state==='error'?'<button class="btn small primary" data-action="retry-ai" type="button">もう一度AIで読む</button> <button class="btn small" data-action="ocr" type="button">簡易の読み取り</button> ':''}${pick('別の写真を選ぶ')}`;
   else body=`<b>レシートの写真から入力</b>${LS.get('tatekae.gk')?'AIで金額・日付・お店を読み取ります。記録の前に確認してください。':'いまは簡易の読み取りです。精度を上げるには、設定でAIのキーを入れてください。'}<br>${pick('写真を撮る・選ぶ')}`;
   box.innerHTML=th+`<div class="tx">${body}</div>`;
 }
@@ -712,71 +712,109 @@ async function pickModels(key,signal){
     if(!r.ok)return [];
     const j=await r.json();
     const list=(j.models||[]).filter(m=>m&&typeof m.name==='string'&&(m.supportedGenerationMethods||[]).includes('generateContent')).map(m=>m.name.replace(/^models\//,''));
-    const ok=list.filter(n=>/^gemini-/.test(n)&&/flash/.test(n)&&!/lite|image|tts|live|audio|embed|robot|computer|exp|native|thinking|preview/.test(n));
+    const bad=/image|tts|live|audio|embed|robot|computer|exp|native|thinking|preview/;
     const ver=n=>{const m=n.match(/gemini-(\d+(?:\.\d+)?)/);return m?parseFloat(m[1]):0};
-    ok.sort((a,b)=>ver(b)-ver(a));
+    const mains=list.filter(n=>/^gemini-/.test(n)&&/flash/.test(n)&&!/lite/.test(n)&&!bad.test(n)).sort((a,b)=>ver(b)-ver(a));
+    const lites=list.filter(n=>/^gemini-/.test(n)&&/flash-lite/.test(n)&&!bad.test(n)).sort((a,b)=>ver(b)-ver(a));
+    if(list.includes('gemini-flash-latest')){const i=mains.indexOf('gemini-flash-latest');if(i>=0)mains.splice(i,1);mains.unshift('gemini-flash-latest')}
     const out=[];
-    if(list.includes('gemini-flash-latest'))out.push('gemini-flash-latest');
-    for(const n of ok)if(!out.includes(n))out.push(n);
-    return out.slice(0,4);
+    for(const n of [mains[0],mains[1],lites[0],mains[2],lites[1]])if(n&&!out.includes(n))out.push(n);
+    return out;
   }catch(e){if(signal&&signal.aborted)throw e;return []}
 }
-async function callModels(key,cands,body,signal){
-  let busy=null;
-  for(const m of cands){
+function linkAbort(parent,ms){
+  const c=new AbortController();
+  const t=setTimeout(()=>c.abort(),ms);
+  const onAbort=()=>c.abort();
+  if(parent){if(parent.aborted)c.abort();else parent.addEventListener('abort',onAbort,{once:true})}
+  return {signal:c.signal,done:()=>{clearTimeout(t);if(parent)parent.removeEventListener('abort',onAbort)}};
+}
+async function doFetch(m,key,body,signal){
+  try{return await fetch(gUrl(m,key,'h'),{method:'POST',headers:gHdr('h',key),body,signal})}
+  catch(e){if(signal.aborted)throw e;return await fetch(gUrl(m,key,'q'),{method:'POST',headers:gHdr('q',key),body,signal})}
+}
+async function callOne(key,m,contents,parent){
+  const L=linkAbort(parent,20000);
+  try{
     let res=null;
-    for(const mode of ['h','q']){
-      try{res=await fetch(gUrl(m,key,mode),{method:'POST',headers:gHdr(mode,key),body,signal})}
-      catch(e){if(signal.aborted)throw e;res=null;continue}
-      if(res.ok||res.status===404||res.status===429||res.status>=500)break;
+    for(const think of [true,false]){
+      const gc={responseMimeType:'application/json',temperature:0};
+      if(think)gc.thinkingConfig={thinkingBudget:0};
+      try{res=await doFetch(m,key,JSON.stringify({contents,generationConfig:gc}),L.signal)}
+      catch(e){if(parent&&parent.aborted)throw e;throw {code:L.signal.aborted?'timeout':'net'}}
+      if(res.status!==400||!think)break;
     }
-    if(!res)throw {code:'net'};
-    if(res.status===404)continue;
-    if(res.status>=500){busy={code:'busy',detail:String(res.status)};continue}
+    if(res.status===404)throw {code:'model'};
+    if(res.status>=500)throw {code:'busy',detail:String(res.status)};
     if(!res.ok){
       const msg=await errMsgOf(res);
       throw {code:res.status===429?'limit':(res.status===400||res.status===401||res.status===403)?'key':'http',detail:res.status+(msg?' '+msg.slice(0,90):'')};
     }
-    let j;try{j=await res.json()}catch(e){throw {code:'json'}}
+    let j;try{j=await res.json()}catch(e){if(parent&&parent.aborted)throw e;throw {code:L.signal.aborted?'timeout':'json'}}
     const parts=j&&j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts;
     const t=Array.isArray(parts)?parts.map(p=>p.text||'').join(''):'';
     if(!t)throw {code:'empty'};
     let o;try{o=JSON.parse(t.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g,''))}catch(e){throw {code:'json'}}
-    const r=normAi(o);
-    LS.set('tatekae.gm',m);
-    return r;
-  }
-  if(busy)throw busy;
-  throw {code:'model',detail:'使えるモデルがありません'};
+    return normAi(o);
+  }finally{L.done()}
 }
-const sleep=(ms,signal)=>new Promise((res,rej)=>{const t=setTimeout(res,ms);if(signal)signal.addEventListener('abort',()=>{clearTimeout(t);rej({name:'AbortError'})},{once:true})});
-async function readWithAI(key,dataUrl,signal){
+function pickErr(errs){
+  const order=['key','limit','busy','timeout','net','json','empty','notreceipt','model','http'];
+  for(const c of order){const e=errs.find(x=>x&&x.code===c);if(e)return e}
+  return errs[0]||{code:'http'};
+}
+function race(key,list,contents,parent){
+  return new Promise((resolve,reject)=>{
+    const ctls=[];const errs=[];let started=0,failed=0,done=false,timer=null;
+    const onParent=()=>finish(reject,{name:'AbortError'});
+    function finish(fn,v){
+      if(done)return;done=true;clearTimeout(timer);
+      if(parent)parent.removeEventListener('abort',onParent);
+      ctls.forEach(c=>c.abort());fn(v);
+    }
+    if(parent){if(parent.aborted)return reject({name:'AbortError'});parent.addEventListener('abort',onParent,{once:true})}
+    function schedule(){clearTimeout(timer);if(!done&&started<list.length)timer=setTimeout(startNext,3500)}
+    function startNext(){
+      if(done||started>=list.length)return;
+      const i=started++;const c=new AbortController();ctls.push(c);
+      callOne(key,list[i],contents,c.signal).then(r=>finish(resolve,r),e=>{
+        if(done)return;
+        errs.push(e);failed++;
+        if(failed>=list.length)finish(reject,pickErr(errs));
+        else if(started-failed===0)startNext();
+      });
+      schedule();
+    }
+    startNext();
+  });
+}
+async function readWithAI(key,dataUrl,parent){
   const b64=dataUrl.split(',')[1];
-  const body=JSON.stringify({contents:[{parts:[{text:aiPrompt()},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],generationConfig:{responseMimeType:'application/json',temperature:0}});
-  const cached=LS.get('tatekae.gm');
-  if(cached){
-    try{return await callModels(key,[cached],body,signal)}
-    catch(e){if(!(e&&(e.code==='model'||e.code==='busy')))throw e;if(e.code==='model')LS.del('tatekae.gm')}
+  const contents=[{parts:[{text:aiPrompt()},{inline_data:{mime_type:'image/jpeg',data:b64}}]}];
+  let list=[];
+  try{list=JSON.parse(LS.get('tatekae.gl')||'[]')}catch(e){}
+  if(!Array.isArray(list)||!list.length){
+    list=await pickModels(key,parent);
+    if(list.length)LS.set('tatekae.gl',JSON.stringify(list));
   }
-  let cands=await pickModels(key,signal);
-  if(!cands.length)cands=GMODELS.slice();
-  try{return await callModels(key,cands,body,signal)}
+  if(!list.length)list=GMODELS.slice();
+  try{return await race(key,list,contents,parent)}
   catch(e){
-    if(!(e&&e.code==='busy'))throw e;
-    await sleep(2500,signal);
-    return await callModels(key,cands,body,signal);
+    if(e&&e.code==='model')LS.del('tatekae.gl');
+    throw e;
   }
 }
 function aiErrMsg(e){
   const c=e&&e.code;
   const why=c==='key'?'AIのキーが正しくないか、使えない状態です。設定で確認してください。'
     :c==='limit'?'AIの無料の利用上限に達しました。しばらくしてからお試しください。'
-    :c==='net'?'AIに接続できませんでした。設定の「接続をテスト」で原因を確認できます。'
+    :c==='net'?'AIに接続できませんでした。通信を確認してください。'
     :c==='busy'?'AIが混み合っています。少し待ってから、もう一度お試しください。'
+    :c==='timeout'?'AIの応答が遅れています。もう一度お試しください。'
     :c==='model'?'使えるAIモデルが見つかりませんでした。'
-    :c==='notreceipt'?'AIがレシートとして読み取れませんでした。'
+    :c==='notreceipt'?'AIがレシートとして読み取れませんでした。写真を撮り直してください。'
     :'AIでうまく読み取れませんでした。';
-  return why+(e&&e.detail?'('+e.detail+')':'')+' 簡易の読み取りに切り替えました。';
+  return why+(e&&e.detail?'('+e.detail+')':'');
 }
 async function testKey(){
   const k=LS.get('tatekae.gk');const out=$('#g-test');if(!out)return;
@@ -807,38 +845,41 @@ function saveKey(){
   else{LS.del('tatekae.gk');toast('キーを削除しました')}
   $('#panel').innerHTML=settingsHtml();
 }
-async function runScan(file){
+async function runScan(file,mode){
   const F=S.form;if(!F)return;
   if(F.stop)F.stop();
+  F.file=file;F.aiFailed=false;F.aiNote='';
+  const gk=LS.get('tatekae.gk');
+  mode=mode||(gk?'ai':'ocr');
+  if(mode==='ai'&&!gk)mode='ocr';
   const tok=++F.token;
   const live=()=>S.form===F&&tok===F.token;
+  const ctl=new AbortController();
   let worker=null,stopped=false;
-  F.stop=()=>{stopped=true;if(worker){try{worker.terminate()}catch(e){}worker=null}};
-  F.aiNote='';
-  setScan('reading','写真を準備中…');
+  F.stop=()=>{stopped=true;ctl.abort();if(worker){try{worker.terminate()}catch(e){}worker=null}};
+  setScan('reading',mode==='ai'?'AIで読み取り中…':'写真を準備中…');
   let loaded;
   try{loaded=await loadImg(file)}catch(e){if(live())setScan('error','この写真を開けませんでした。別の写真を選ぶか、手入力してください。');return}
-  let canvas;
+  let canvas=null;
   try{
     F.thumb=canvasOf(loaded.im,900).toDataURL('image/jpeg',0.6);
-    canvas=canvasOf(loaded.im,1600);F.jpeg=canvas.toDataURL('image/jpeg',0.85);prepCanvas(canvas);
+    if(mode==='ai')F.jpeg=canvasOf(loaded.im,1280).toDataURL('image/jpeg',0.8);
+    else{canvas=canvasOf(loaded.im,1600);prepCanvas(canvas)}
   }catch(e){URL.revokeObjectURL(loaded.url);if(live())setScan('error','この写真を処理できませんでした。別の写真を選ぶか、手入力してください。');return}
   URL.revokeObjectURL(loaded.url);
   if(!live())return;
-  const gk=LS.get('tatekae.gk');
-  if(gk&&F.jpeg){
-    setScan('reading','AIで読み取り中…');
-    const ctl=new AbortController();
-    F.stop=()=>{stopped=true;ctl.abort();if(worker){try{worker.terminate()}catch(e){}worker=null}};
+  if(mode==='ai'){
     try{
       const r=await readWithAI(gk,F.jpeg,ctl.signal);
       if(!live()||stopped)return;
-      applyScan(F,r);return;
+      applyScan(F,r);
     }catch(e){
       if(!live())return;
       if(stopped||(e&&e.name==='AbortError')){setScan('manual','読み取りを中止しました。金額などを入力してください。');return}
-      F.aiNote=aiErrMsg(e);
+      F.aiFailed=true;
+      setScan('error',aiErrMsg(e));
     }
+    return;
   }
   setScan('reading','読み取りの準備中…(初回はデータの読み込みに数分かかることがあります)');
   try{
@@ -981,6 +1022,8 @@ document.addEventListener('click',ev=>{
       else{S.delArm=id;renderDetail(ex);setTimeout(()=>{if(S.delArm===id){S.delArm=null;const e2=S.expenses.find(x=>x.id===id);if(e2&&S.sheet&&S.sheet.type==='detail'&&S.sheet.id===id)renderDetail(e2)}},4000)}
       break;
     case 'save':saveForm();break;
+    case 'retry-ai':if(S.form&&S.form.file)runScan(S.form.file,'ai');break;
+    case 'ocr':if(S.form&&S.form.file)runScan(S.form.file,'ocr');break;
     case 'stop-scan':if(S.form&&S.form.stop)S.form.stop();break;
     case 'setup':saveNames('setup');break;
     case 'save-settings':saveNames('settings');break;
