@@ -198,6 +198,21 @@ html,body{overflow-x:hidden;overscroll-behavior-x:none}
 .field input[type=date]::-webkit-calendar-picker-indicator{margin:0}
 .amt-in{max-width:100%}
 .amt-in input{text-align:left}
+
+.brow{display:grid;grid-template-columns:56px minmax(0,1fr);gap:10px;border:1px solid var(--line);border-radius:12px;padding:10px;margin-bottom:10px;background:var(--surface-2)}
+.brow[hidden]{display:none}
+.bth{width:56px;height:76px;object-fit:cover;border-radius:6px;border:1px solid var(--line)}
+.bfs{display:grid;gap:8px;min-width:0}
+.bhd{display:flex;justify-content:space-between;align-items:center;gap:8px;min-width:0}
+.bst{font-size:12px;color:var(--ink-2);min-width:0;overflow-wrap:anywhere}
+.bst.done{color:var(--done);font-weight:700}
+.bst.error{color:var(--danger);font-weight:700}
+.bx{width:36px;height:36px;border-radius:50%;border:0;background:var(--surface);font-size:20px;line-height:1;flex:none;color:var(--ink-2)}
+.btwo{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
+.bin{min-height:44px;border-radius:10px;border:1px solid var(--line-strong);background:var(--surface);padding:0 10px;font-size:16px;width:100%;min-width:0;max-width:100%}
+.bin[type=date]{-webkit-appearance:none;appearance:none;display:block;text-align:left;line-height:normal}
+.bin[type=date]::-webkit-date-and-time-value{text-align:left;min-width:0;margin:0}
+input[data-k=amount]{font-family:var(--f-num)}
 </style>
 </head>
 <body>
@@ -221,7 +236,7 @@ html,body{overflow-x:hidden;overscroll-behavior-x:none}
     <button class="btn" data-action="manual" type="button">手入力</button>
   </div>
 </div>
-<input type="file" id="photo" accept="image/*" class="vh" tabindex="-1">
+<input type="file" id="photo" accept="image/*" multiple class="vh" tabindex="-1">
 
 <div class="sheet" id="sheet" hidden><div class="panel" id="panel" role="dialog" aria-modal="true"></div></div>
 <div class="toast" id="toast" role="status" hidden></div>
@@ -332,6 +347,7 @@ function openSheet(type,html,extra){
 }
 function closeSheet(){
   if(S.form&&S.form.stop)S.form.stop();
+  if(S.batch){if(S.batch.stop)S.batch.stop();S.batch=null}
   S.form=null;S.sheet=null;S.delArm=null;S.resetArm=false;
   $('#sheet').hidden=true;document.body.classList.remove('lock');$('#panel').innerHTML='';
 }
@@ -581,7 +597,7 @@ function setScan(state,msg,pct){
   if(state==='reading')body=`<b><span class="spin"></span>${esc(msg||'読み取り中…')}${pct!=null?' '+pct+'%':''}</b>入力しながら待てます。<br><button class="btn small" data-action="stop-scan" type="button">中止</button>`;
   else if(state==='done')body=`<b>読み取りました</b>${esc(msg||'')}<br>${pick('写真を選び直す')}`;
   else if(state==='error'||state==='manual')body=`<b>${state==='error'?'読み取れませんでした':'写真を添付しました'}</b>${esc(msg||'')}<br>${F.aiFailed&&state==='error'?'<button class="btn small primary" data-action="retry-ai" type="button">もう一度AIで読む</button> <button class="btn small" data-action="ocr" type="button">簡易の読み取り</button> ':''}${pick('別の写真を選ぶ')}`;
-  else body=`<b>レシートの写真から入力</b>${LS.get('tatekae.gk')?'AIで金額・日付・お店を読み取ります。記録の前に確認してください。':'いまは簡易の読み取りです。精度を上げるには、設定でAIのキーを入れてください。'}<br>${pick('写真を撮る・選ぶ')}`;
+  else body=`<b>レシートの写真から入力</b>${LS.get('tatekae.gk')?'AIで金額・日付・お店を読み取ります。記録の前に確認してください。':'いまは簡易の読み取りです。精度を上げるには、設定でAIのキーを入れてください。'}<br>${pick('写真を撮る・選ぶ')}<span class="hint" style="display:block;margin-top:6px">写真は複数枚まとめて選べます(最大12枚)。</span>`;
   box.innerHTML=th+`<div class="tx">${body}</div>`;
 }
 
@@ -925,6 +941,142 @@ function applyScan(F,r){
   setScan('done',(F.aiNote?F.aiNote+' ':'')+(miss.length?`${miss.join('・')}は読み取れませんでした。入力してください。`:'金額と日付を確かめてから記録してください。'));
 }
 
+/* ---------- batch (several photos at once) ---------- */
+const MAXB=12;
+function batchRowHtml(r,i){
+  const cat=CATS.map(c=>`<option>${c}</option>`).join('');
+  return `<div class="brow" id="brow-${i}">
+    <img class="bth" id="bth-${i}" alt="レシート${i+1}枚目" hidden>
+    <div class="bfs">
+      <div class="bhd"><span class="bst" id="bst-${i}">待機中…</span><button class="bx" type="button" data-action="b-del" data-i="${i}" aria-label="この写真を外す">×</button></div>
+      <div class="btwo"><input class="bin" id="b-amt-${i}" data-i="${i}" data-k="amount" inputmode="numeric" autocomplete="off" placeholder="金額" aria-label="金額"><input class="bin" type="date" id="b-date-${i}" data-i="${i}" data-k="date" value="${todayStr()}" aria-label="日付"></div>
+      <input class="bin" type="text" id="b-store-${i}" data-i="${i}" data-k="store" maxlength="60" autocomplete="off" placeholder="お店・内容" aria-label="お店・内容">
+      <select class="bin" id="b-cat-${i}" data-i="${i}" data-k="category" aria-label="カテゴリ">${cat}</select>
+    </div></div>`;
+}
+function batchHtml(){
+  const B=S.batch;const me=S.me||'a';
+  return `<div class="sh-head"><h2>まとめて読み取り</h2><button class="x" data-action="close" type="button" aria-label="閉じる">${ICON.x}</button></div>
+    <p class="sub" id="b-sum"></p>
+    <div class="field"><span class="lbl">払った人(すべて同じ)</span>
+      <div class="seg" role="radiogroup" aria-label="払った人">
+        <input type="radio" name="bpayer" id="b-pa" value="a" ${me==='a'?'checked':''}><label for="b-pa">${chip('a')}${esc(nm('a'))}</label>
+        <input type="radio" name="bpayer" id="b-pb" value="b" ${me==='b'?'checked':''}><label for="b-pb">${chip('b')}${esc(nm('b'))}</label>
+      </div></div>
+    <div id="b-rows">${B.rows.map(batchRowHtml).join('')}</div>
+    <p class="err" id="b-err" role="alert" hidden></p>
+    <button class="btn primary wide" id="b-save" data-action="b-save" type="button" disabled>読み取り中…</button>`;
+}
+function batchSummary(){
+  const B=S.batch;if(!B)return;
+  const act=B.rows.filter(r=>!r.removed);
+  const pending=act.filter(r=>r.status==='wait'||r.status==='reading').length;
+  const sm=$('#b-sum');
+  if(sm)sm.textContent=pending?`${act.length-pending}/${act.length}枚を読み取りました。残りは読み取り中です。`:`${act.length}枚の読み取りが終わりました。金額・日付・お店を確かめてください。`;
+  const b=$('#b-save');
+  if(b){b.disabled=B.saving||pending>0||act.length===0;b.textContent=pending?'読み取り中…':`${act.length}件を記録する`}
+}
+function batchStatus(i,state,msg){
+  const B=S.batch;if(!B||!B.rows[i])return;
+  B.rows[i].status=state;
+  const el=$('#bst-'+i);if(el){el.textContent=msg||'';el.className='bst '+state}
+  batchSummary();
+}
+function fillBatchRow(i,res){
+  const B=S.batch;const r=B.rows[i];
+  const put=(id,k,v)=>{const el=$('#'+id);if(el&&v!==''&&v!=null&&!r.dirty.has(k))el.value=v};
+  if(res.total>0)put('b-amt-'+i,'amount',String(res.total));
+  if(res.store)put('b-store-'+i,'store',res.store);
+  if(res.date)put('b-date-'+i,'date',res.date);
+  if(CATS.includes(res.category))put('b-cat-'+i,'category',res.category);
+  r.items=Array.isArray(res.items)?res.items:[];
+  const miss=[];if(!(res.total>0))miss.push('金額');if(!res.date)miss.push('日付');
+  batchStatus(i,'done',miss.length?`${miss.join('・')}を入力してください`:'読み取りました');
+}
+async function startBatch(files){
+  files=[...files].slice(0,MAXB);
+  closeSheet();
+  const gk=LS.get('tatekae.gk');
+  const B=S.batch={rows:files.map(f=>({file:f,status:'wait',removed:false,dirty:new Set(),items:[],thumb:''})),stop:null,dupOk:false,saving:false};
+  const ctl=new AbortController();let worker=null,stopped=false;
+  B.stop=()=>{stopped=true;ctl.abort();if(worker){try{worker.terminate()}catch(e){}worker=null}};
+  openSheet('batch',batchHtml(),{});
+  batchSummary();
+  const live=()=>S.batch===B&&!stopped;
+  const getWorker=async()=>{
+    if(!window.Tesseract)await loadScript(TESS);
+    if(!worker)worker=await window.Tesseract.createWorker('jpn+eng',1);
+    return worker;
+  };
+  const one=async i=>{
+    const r=B.rows[i];if(r.removed||!live())return;
+    batchStatus(i,'reading',gk?'AIで読み取り中…':'読み取り中…(初回は数分かかることがあります)');
+    let loaded;
+    try{loaded=await loadImg(r.file)}catch(e){batchStatus(i,'error','写真を開けませんでした。入力してください');return}
+    let jpeg='',canvas=null;
+    try{
+      r.thumb=canvasOf(loaded.im,900).toDataURL('image/jpeg',0.6);
+      if(gk)jpeg=canvasOf(loaded.im,1280).toDataURL('image/jpeg',0.8);
+      else{canvas=canvasOf(loaded.im,1600);prepCanvas(canvas)}
+    }catch(e){URL.revokeObjectURL(loaded.url);batchStatus(i,'error','写真を処理できませんでした。入力してください');return}
+    URL.revokeObjectURL(loaded.url);
+    const th=$('#bth-'+i);if(th&&live()){th.src=r.thumb;th.hidden=false}
+    if(!live()||r.removed)return;
+    try{
+      let res;
+      if(gk)res=await readWithAI(gk,jpeg,ctl.signal);
+      else{const w=await getWorker();if(!live())return;const o=await w.recognize(canvas);res=parseReceipt(o&&o.data&&o.data.text||'');res.items=[]}
+      if(!live())return;
+      fillBatchRow(i,res);
+    }catch(e){
+      if(!live()||(e&&e.name==='AbortError'))return;
+      batchStatus(i,'error',(gk?aiErrMsg(e):'読み取れませんでした。')+' 入力してください');
+    }
+  };
+  const q=files.map((_,i)=>i);
+  const conc=gk?2:1;
+  await Promise.all(Array.from({length:conc},async()=>{while(q.length&&live()){await one(q.shift())}}));
+  if(worker){try{await worker.terminate()}catch(e){}worker=null}
+  if(live())batchSummary();
+}
+async function saveBatch(){
+  const B=S.batch;if(!B||B.saving)return;
+  const err=$('#b-err');err.hidden=true;
+  const pr=document.querySelector('input[name=bpayer]:checked');const payer=pr?pr.value:'a';
+  const out=[];
+  for(let i=0;i<B.rows.length;i++){
+    const r=B.rows[i];if(r.removed)continue;
+    const amount=num($('#b-amt-'+i).value);const date=$('#b-date-'+i).value;
+    if(!(amount>0)||!isDate(date)){err.textContent=`${i+1}枚目の金額と日付を確認してください。いらない写真は × で外せます。`;err.hidden=false;return}
+    out.push({i,r,amount,date,store:$('#b-store-'+i).value.trim(),category:$('#b-cat-'+i).value});
+  }
+  if(!out.length)return;
+  if(!B.dupOk){
+    const seen=new Set();let dup=false;
+    for(const o of out){
+      const k=o.date+'|'+o.amount;
+      if(seen.has(k)||S.expenses.some(e=>e.date===o.date&&e.amount===o.amount&&(e.store===o.store||!o.store||!e.store)))dup=true;
+      seen.add(k);
+    }
+    if(dup){B.dupOk=true;err.textContent='同じ日・同じ金額の記録があります。重複でなければ、もう一度押してください。';err.hidden=false;return}
+  }
+  B.saving=true;batchSummary();
+  let ok=0;
+  try{
+    for(const o of out){
+      const ref=FS.m.doc(C('expenses'));
+      let hasReceipt=false;
+      if(o.r.thumb){try{await wr(FS.m.setDoc(R('receipts',ref.id),{img:o.r.thumb}));hasReceipt=true}catch(e){}}
+      await wr(FS.m.setDoc(ref,{payer,amount:o.amount,date:o.date,store:o.store,category:o.category,time:'',memo:'',items:o.r.items||[],settled:false,settledAt:null,settledBy:null,createdAt:new Date().toISOString(),createdBy:S.me||null,hasReceipt}));
+      ok++;o.r.removed=true;const el=$('#brow-'+o.i);if(el)el.hidden=true;
+    }
+    closeSheet();toast(ok+'件を記録しました');
+  }catch(e){
+    B.saving=false;batchSummary();writeFail(e);
+    if(ok)toast(ok+'件まで記録しました。残りをもう一度記録してください');
+  }
+}
+
 /* ---------- writes ---------- */
 async function saveForm(){
   const F=S.form;if(!F||F.saving)return;
@@ -1033,6 +1185,8 @@ document.addEventListener('click',ev=>{
       else{S.delArm=id;renderDetail(ex);setTimeout(()=>{if(S.delArm===id){S.delArm=null;const e2=S.expenses.find(x=>x.id===id);if(e2&&S.sheet&&S.sheet.type==='detail'&&S.sheet.id===id)renderDetail(e2)}},4000)}
       break;
     case 'save':saveForm();break;
+    case 'b-save':saveBatch();break;
+    case 'b-del':{const B=S.batch,i=+t.dataset.i;if(B&&B.rows[i]){B.rows[i].removed=true;const el=$('#brow-'+i);if(el)el.hidden=true;batchSummary()}break}
     case 'retry-ai':if(S.form&&S.form.file)runScan(S.form.file,'ai');break;
     case 'ocr':if(S.form&&S.form.file)runScan(S.form.file,'ocr');break;
     case 'stop-scan':if(S.form&&S.form.stop)S.form.stop();break;
@@ -1054,13 +1208,16 @@ document.addEventListener('keydown',ev=>{
   if((ev.key==='Enter'||ev.key===' ')&&ev.target.id==='photoBtn'){ev.preventDefault();$('#photo').click()}
 });
 $('#panel').addEventListener('input',ev=>{
+  if(S.batch&&ev.target.dataset&&ev.target.dataset.i!==undefined){const r=S.batch.rows[+ev.target.dataset.i];if(r)r.dirty.add(ev.target.dataset.k);return}
   if(S.form&&ev.target.id)S.form.dirty.add(ev.target.id);
   if(S.form)updateClaim();
 });
 $('#panel').addEventListener('change',()=>{if(S.form)updateClaim()});
 $('#photo').addEventListener('change',ev=>{
-  const f=ev.target.files&&ev.target.files[0];ev.target.value='';
-  if(!f)return;
+  const all=ev.target.files?[...ev.target.files]:[];ev.target.value='';
+  if(!all.length)return;
+  if(all.length>1){startBatch(all);return}
+  const f=all[0];
   if(!(S.form&&S.form.mode==='new'))openForm({mode:'new',payer:S.me||'a',amount:'',date:todayStr(),time:'',store:'',category:CATS[0],memo:''});
   runScan(f);
 });
